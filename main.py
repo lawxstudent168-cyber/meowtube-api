@@ -8,6 +8,7 @@ from telethon.sessions import StringSession
 
 app = FastAPI(title="家庭劇院串流 API")
 
+# 允許前端跨網域存取
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"], 
@@ -16,15 +17,18 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# 載入環境變數
 API_ID = int(os.environ.get("API_ID", 0))
 API_HASH = os.environ.get("API_HASH", "")
 SESSION_STRING = os.environ.get("SESSION_STRING", "")
 TARGET_GROUP_ID = int(os.environ.get("TARGET_GROUP_ID", 0))
 
+# 初始化 Telegram 客戶端
 client = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH)
 
 @app.on_event("startup")
 async def startup_event():
+    """伺服器啟動時，自動連接 Telegram"""
     await client.connect()
 
 @app.get("/")
@@ -36,9 +40,11 @@ def read_root():
 # ==========================================
 @app.get("/stream/{message_id}")
 async def stream_movie(request: Request, message_id: int):
+    # 確保連線活著
     if not client.is_connected():
         await client.connect()
 
+    # 取得影片訊息
     message = await client.get_messages(TARGET_GROUP_ID, ids=message_id)
     if not message or not getattr(message, 'file', None):
         raise HTTPException(status_code=404, detail="在 Telegram 中找不到此影片檔")
@@ -58,8 +64,9 @@ async def stream_movie(request: Request, message_id: int):
             end_str = range_match.group(2)
             if end_str:
                 end = int(end_str)
-            status_code = 206 # 標記為 206 Partial Content
+            status_code = 206 # 標記為 206 Partial Content，允許跳轉與斷點續傳
 
+    # 範圍錯誤保護
     if start >= file_size:
         return Response(
             status_code=416,
@@ -69,7 +76,7 @@ async def stream_movie(request: Request, message_id: int):
     # 這次請求總共需要傳輸多少位元組
     req_length = end - start + 1
 
-    # 2. 核心修復：Telegram 規定 offset 必須嚴格對齊 (我們以 1MB 為單位對齊)
+    # 2. 核心邏輯：Telegram 規定 offset 必須嚴格對齊 (我們以 1MB 為單位對齊)
     CHUNK_SIZE = 1024 * 1024
     aligned_start = start - (start % CHUNK_SIZE)
     skip_bytes = start - aligned_start # 計算從對齊點開始，有多少位元組是我們「不需要」的
@@ -78,25 +85,28 @@ async def stream_movie(request: Request, message_id: int):
         yielded_bytes = 0
         skip = skip_bytes
         
-        # 3. 核心修復：正確使用 request_size，並從對齊點 (aligned_start) 開始抓取
+        # 3. 正確使用 request_size，並從對齊點 (aligned_start) 開始抓取
         async for chunk in client.iter_download(
             message.media,
             offset=aligned_start,
             request_size=CHUNK_SIZE
         ):
-            # 如果需要跳過前面的無用位元組
+            # 💡 致命錯誤修復：將 Telegram 的 memoryview 強制轉型為 FastAPI 認得的 bytes
+            chunk_data = bytes(chunk)
+
+            # 如果需要跳過前面的無用位元組 (這通常發生在第一包 chunk)
             if skip > 0:
-                chunk = chunk[skip:]
+                chunk_data = chunk_data[skip:]
                 skip = 0
                 
             # 如果加上這塊 chunk 會超過瀏覽器要求的總長度，就精準切斷並結束
-            if yielded_bytes + len(chunk) > req_length:
-                chunk = chunk[:req_length - yielded_bytes]
-                yield chunk
+            if yielded_bytes + len(chunk_data) > req_length:
+                chunk_data = chunk_data[:req_length - yielded_bytes]
+                yield chunk_data
                 break
                 
-            yield chunk
-            yielded_bytes += len(chunk)
+            yield chunk_data
+            yielded_bytes += len(chunk_data)
 
     # 4. 嚴格遵守 HTML5 影片串流的 Header 規範
     headers = {
