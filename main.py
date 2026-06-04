@@ -1,5 +1,6 @@
 import os
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException
+import re
+from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from telethon import TelegramClient
@@ -7,102 +8,109 @@ from telethon.sessions import StringSession
 
 app = FastAPI(title="家庭劇院串流 API")
 
-# 設定 CORS，允許 Nuxt 前端跨網域請求
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"], # 之後若部署到 Vercel，可以把這裡改成你的 Vercel 網址以增加安全性
+    allow_origins=["*"], 
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# 載入環境變數 (Render 後台設定)
 API_ID = int(os.environ.get("API_ID", 0))
 API_HASH = os.environ.get("API_HASH", "")
 SESSION_STRING = os.environ.get("SESSION_STRING", "")
 TARGET_GROUP_ID = int(os.environ.get("TARGET_GROUP_ID", 0))
 
-# 初始化 Telegram 用戶端
 client = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH)
 
 @app.on_event("startup")
 async def startup_event():
-    """伺服器啟動時，自動連接 Telegram"""
     await client.connect()
 
 @app.get("/")
 def read_root():
-    """健康檢查端點 (用給 cron-job.org 喚醒伺服器用)"""
     return {"status": "Home Theater Streaming API is awake and running!"}
 
 # ==========================================
-# ⬆️ 1. 影片上傳端點
-# ==========================================
-@app.post("/upload/")
-async def upload_movie(
-    file: UploadFile = File(...), 
-    topic_id: int = Form(None), # 若你的群組沒有開啟論壇模式(Topics)，這個可以留空
-    caption: str = Form(None)
-):
-    if not client.is_connected():
-        await client.connect()
-
-    # Render 提供 /tmp 目錄供暫存，非常適合大檔案過渡
-    temp_file_path = f"/tmp/{file.filename}"
-    
-    try:
-        # 將前端傳來的影片分塊寫入 Render 的暫存空間
-        with open(temp_file_path, "wb") as buffer:
-            while chunk := await file.read(1024 * 1024): # 每次讀寫 1MB
-                buffer.write(chunk)
-        
-        final_caption = caption if caption else f"🎬 電影上傳：{file.filename}"
-
-        # 上傳至 Telegram
-        message = await client.send_file(
-            TARGET_GROUP_ID,
-            file=temp_file_path,
-            reply_to=topic_id,
-            caption=final_caption,
-            force_document=True,
-            supports_streaming=True # 標記為支援串流
-        )
-
-        return {
-            "success": True,
-            "filename": file.filename,
-            "message_id": message.id
-        }
-
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"上傳失敗: {str(e)}")
-    finally:
-        # 確保上傳後刪除暫存檔，釋放 Render 空間
-        if os.path.exists(temp_file_path):
-            os.remove(temp_file_path)
-
-# ==========================================
-# ⬇️ 2. 影片網頁串流播放端點 (核心功能)
+# ⬇️ 影片網頁串流播放端點 (精準 HTTP 206 斷點續傳)
 # ==========================================
 @app.get("/stream/{message_id}")
-async def stream_movie(message_id: int):
+async def stream_movie(request: Request, message_id: int):
     if not client.is_connected():
         await client.connect()
 
-    # 取得影片檔案
     message = await client.get_messages(TARGET_GROUP_ID, ids=message_id)
-    if not message or not message.media:
-        raise HTTPException(status_code=404, detail="在 Telegram 中找不到此影片")
+    if not message or not getattr(message, 'file', None):
+        raise HTTPException(status_code=404, detail="在 Telegram 中找不到此影片檔")
 
-    # 建立一個非同步生成器，不斷從 Telegram 拉取影片流
+    file_size = message.file.size
+    range_header = request.headers.get("Range")
+    
+    start = 0
+    end = file_size - 1
+    status_code = 200
+
+    # 1. 解析瀏覽器要求的 Range (例如 bytes=100-200)
+    if range_header:
+        range_match = re.match(r"bytes=(\d+)-(\d*)", range_header)
+        if range_match:
+            start = int(range_match.group(1))
+            end_str = range_match.group(2)
+            if end_str:
+                end = int(end_str)
+            status_code = 206 # 標記為 206 Partial Content
+
+    if start >= file_size:
+        return Response(
+            status_code=416,
+            headers={"Content-Range": f"bytes */{file_size}"}
+        )
+
+    # 這次請求總共需要傳輸多少位元組
+    req_length = end - start + 1
+
+    # 2. 核心修復：Telegram 規定 offset 必須嚴格對齊 (我們以 1MB 為單位對齊)
+    CHUNK_SIZE = 1024 * 1024
+    aligned_start = start - (start % CHUNK_SIZE)
+    skip_bytes = start - aligned_start # 計算從對齊點開始，有多少位元組是我們「不需要」的
+
     async def video_streamer():
-        # 以 1MB 為單位拉取，完美適配 Render 512MB 記憶體限制
-        async for chunk in client.iter_download(message.media, chunk_size=1024 * 1024):
+        yielded_bytes = 0
+        skip = skip_bytes
+        
+        # 3. 核心修復：正確使用 request_size，並從對齊點 (aligned_start) 開始抓取
+        async for chunk in client.iter_download(
+            message.media,
+            offset=aligned_start,
+            request_size=CHUNK_SIZE
+        ):
+            # 如果需要跳過前面的無用位元組
+            if skip > 0:
+                chunk = chunk[skip:]
+                skip = 0
+                
+            # 如果加上這塊 chunk 會超過瀏覽器要求的總長度，就精準切斷並結束
+            if yielded_bytes + len(chunk) > req_length:
+                chunk = chunk[:req_length - yielded_bytes]
+                yield chunk
+                break
+                
             yield chunk
+            yielded_bytes += len(chunk)
 
-    # 關鍵：回傳 StreamingResponse，並指定 media_type，不使用 attachment 標頭
-    # 這樣瀏覽器的 <video> 標籤才能直接邊載邊播
+    # 4. 嚴格遵守 HTML5 影片串流的 Header 規範
+    headers = {
+        "Accept-Ranges": "bytes",
+        "Content-Length": str(req_length),
+        "Content-Type": message.file.mime_type or "video/mp4",
+    }
+    
+    if status_code == 206:
+        headers["Content-Range"] = f"bytes {start}-{end}/{file_size}"
+
     return StreamingResponse(
         video_streamer(), 
-        media_type="video/mp4" 
+        status_code=status_code,
+        headers=headers,
+        media_type=message.file.mime_type or "video/mp4"
     )
