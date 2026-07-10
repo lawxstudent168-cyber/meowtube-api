@@ -172,3 +172,7 @@ async def delete_movie(message_id: int):
         return {"success": True}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/ping")
+def ping():
+    return {"status": "awake", "message": "Meowtube API is running!"}
