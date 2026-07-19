@@ -143,3 +143,35 @@ async def stream_video(message_id: int, request: Request, is_secret: bool = Fals
         status_code = 200
         
     return StreamingResponse(video_generator(), status_code=status_code, headers=headers)
+
+
+# ==========================================
+# 6. 專屬 Debug 探照燈 (用來檢測 Telegram 到底回傳了什麼)
+# ==========================================
+@app.get("/debug/{message_id}")
+async def debug_telegram_message(message_id: int, is_secret: bool = False):
+    target_chat_id = SECRET_CHAT_ID if is_secret else PUBLIC_CHAT_ID
+    
+    try:
+        message = await client.get_messages(target_chat_id, ids=message_id)
+        
+        # 再次確保快取刷新
+        if not message:
+            await client.get_dialogs()
+            message = await client.get_messages(target_chat_id, ids=message_id)
+            
+        if not message:
+            return {"status": "failed", "detail": "Telegram 回報：完全找不到這則訊息"}
+            
+        return {
+            "status": "success",
+            "target_chat_id": target_chat_id,
+            "message_id": message.id,
+            "text": message.text,
+            "has_media": bool(message.media),
+            "media_type": type(message.media).__name__ if message.media else "無媒體",
+            "file_name": message.file.name if (message.media and message.file) else "未知",
+            "file_size_bytes": message.file.size if (message.media and message.file) else 0,
+        }
+    except Exception as e:
+        return {"status": "error", "error_message": str(e)}
