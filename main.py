@@ -83,7 +83,7 @@ async def stream_video(message_id: int, request: Request, is_secret: bool = Fals
          
     file_size = message.file.size
     
-    # 🛡️ 核心修復 1：強制宣告為影片格式
+    # 強制宣告為影片格式
     mime_type = "video/mp4" 
     
     range_header = request.headers.get("Range")
@@ -97,9 +97,8 @@ async def stream_video(message_id: int, request: Request, is_secret: bool = Fals
         
     chunk_size = end - start + 1
     
-    # 🛡️ 核心修復 5：Telegram 區塊對齊 (解決 Invalid limit 錯誤)
-    # Telegram 規定 offset 必須是 512KB 的倍數
-    ALIGN_SIZE = 512 * 1024
+    # 🛡️ 終極修復：對齊 Telethon 預設的 1MB 區塊
+    ALIGN_SIZE = 1024 * 1024 
     aligned_offset = (start // ALIGN_SIZE) * ALIGN_SIZE
     skip_bytes = start - aligned_offset
     
@@ -109,16 +108,18 @@ async def stream_video(message_id: int, request: Request, is_secret: bool = Fals
             bytes_left = chunk_size
             current_skip = skip_bytes
             
-            # 🛡️ 核心修復 2：直接傳入 message 物件，保留私密群組的下載權限上下文
-            # 改用 aligned_offset 向 Telegram 請求合法區塊
-            async for chunk in client.iter_download(message, offset=aligned_offset):
-                # 🛡️ 核心修復 3：將 Telethon 的 memoryview 強制轉型為標準 bytes
+            # 👇 明確指定 request_size，確保 Telethon 按照 1MB 的單位拿資料
+            async for chunk in client.iter_download(message, offset=aligned_offset, request_size=ALIGN_SIZE):
                 chunk_bytes = bytes(chunk)
                 
-                # 切除對齊產生、但瀏覽器不需要的前段多餘資料
+                # 🛡️ 嚴謹的跳過邏輯：確保不會因為單次 chunk 太小而切錯位置
                 if current_skip > 0:
-                    chunk_bytes = chunk_bytes[current_skip:]
-                    current_skip = 0
+                    if current_skip >= len(chunk_bytes):
+                        current_skip -= len(chunk_bytes)
+                        continue  # 這個 chunk 完全不需要，直接跳過
+                    else:
+                        chunk_bytes = chunk_bytes[current_skip:]
+                        current_skip = 0
                 
                 if not chunk_bytes:
                     continue
@@ -134,7 +135,7 @@ async def stream_video(message_id: int, request: Request, is_secret: bool = Fals
         except Exception as e:
             print(f"❌ 影片串流發生致命錯誤 (Message ID: {message_id}): {str(e)}")
 
-    # 🛡️ 核心修復 4：嚴格遵守 HTTP 規範，精準設定 Headers
+    # 嚴格遵守 HTTP 規範，精準設定 Headers
     headers = {
         "Accept-Ranges": "bytes",
         "Content-Length": str(chunk_size),
