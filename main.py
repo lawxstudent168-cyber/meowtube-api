@@ -97,15 +97,32 @@ async def stream_video(message_id: int, request: Request, is_secret: bool = Fals
         
     chunk_size = end - start + 1
     
+    # 🛡️ 核心修復 5：Telegram 區塊對齊 (解決 Invalid limit 錯誤)
+    # Telegram 規定 offset 必須是 512KB 的倍數
+    ALIGN_SIZE = 512 * 1024
+    aligned_offset = (start // ALIGN_SIZE) * ALIGN_SIZE
+    skip_bytes = start - aligned_offset
+    
     # 建立非同步的影片區塊生成器
     async def video_generator():
         try:
             bytes_left = chunk_size
+            current_skip = skip_bytes
+            
             # 🛡️ 核心修復 2：直接傳入 message 物件，保留私密群組的下載權限上下文
-            async for chunk in client.iter_download(message, offset=start):
+            # 改用 aligned_offset 向 Telegram 請求合法區塊
+            async for chunk in client.iter_download(message, offset=aligned_offset):
                 # 🛡️ 核心修復 3：將 Telethon 的 memoryview 強制轉型為標準 bytes
                 chunk_bytes = bytes(chunk)
                 
+                # 切除對齊產生、但瀏覽器不需要的前段多餘資料
+                if current_skip > 0:
+                    chunk_bytes = chunk_bytes[current_skip:]
+                    current_skip = 0
+                
+                if not chunk_bytes:
+                    continue
+                    
                 if bytes_left <= 0:
                     break
                 if len(chunk_bytes) >= bytes_left:
