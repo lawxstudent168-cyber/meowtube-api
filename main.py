@@ -101,7 +101,11 @@ async def stream_video(message_id: int, request: Request, is_secret: bool = Fals
          
     # 👇 核心修復 1：使用 message.file 確保安全，並動態抓取真實的 mime_type
     file_size = message.file.size
-    mime_type = message.file.mime_type or "video/mp4"
+# ❌ 刪除或註解掉這行：
+    # mime_type = message.file.mime_type or "video/mp4"
+    
+    # ✅ 改成這行（強制所有檔案都用標準 mp4 格式串流給瀏覽器）：
+    mime_type = "video/mp4"
     
     range_header = request.headers.get("Range")
     if range_header:
