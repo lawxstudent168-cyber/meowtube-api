@@ -12,7 +12,7 @@ from dotenv import load_dotenv
 # ==========================================
 load_dotenv()
 
-# 👇 變數名稱已經修改為與 Render 上一模一樣
+# 變數名稱已經修改為與 Render 上一模一樣
 API_ID = int(os.getenv("API_ID", 0))
 API_HASH = os.getenv("API_HASH", "")
 SESSION_STRING = os.getenv("SESSION_STRING", "")
@@ -24,10 +24,10 @@ SECRET_CHAT_ID = int(os.getenv("SECRET_TELEGRAM_CHAT_ID", 0))
 # 初始化 FastAPI
 app = FastAPI(title="Meowtube API")
 
-# 設定 CORS (讓您的 Nuxt 前端可以順利跨網域呼叫)
+# 設定 CORS
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"], # 實務上建議改成您的 Vercel 網域，如 ["https://meowtube-xi.vercel.app"]
+    allow_origins=["*"], 
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -42,7 +42,6 @@ client = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH)
 @app.on_event("startup")
 async def startup_event():
     await client.connect()
-    # 確保 Session 是有效的
     if not await client.is_user_authorized():
         print("❌ Telegram Session 無效，請重新取得 Session String！")
     else:
@@ -64,7 +63,6 @@ def read_root():
 # ==========================================
 @app.get("/stream/{message_id}")
 async def stream_video(message_id: int, request: Request, is_secret: bool = False):
-    # 判斷要前往公開還是私密群組撈取檔案
     target_chat_id = SECRET_CHAT_ID if is_secret else PUBLIC_CHAT_ID
     
     try:
@@ -83,13 +81,11 @@ async def stream_video(message_id: int, request: Request, is_secret: bool = Fals
     if not message or not message.media:
          raise HTTPException(status_code=404, detail="找不到影片，或該訊息不含媒體檔案")
          
-    # 取得檔案大小
     file_size = message.file.size
     
-    # 🛡️ 核心修復 1：強制宣告為影片格式，避免被 Telegram 的 Document 類型誤導
+    # 🛡️ 核心修復 1：強制宣告為影片格式
     mime_type = "video/mp4" 
     
-    # 解析瀏覽器傳來的 Range 標頭 (HTTP 206 串流必備)
     range_header = request.headers.get("Range")
     if range_header:
         start, end = range_header.replace("bytes=", "").split("-")
@@ -105,19 +101,23 @@ async def stream_video(message_id: int, request: Request, is_secret: bool = Fals
     async def video_generator():
         try:
             bytes_left = chunk_size
-            # 🛡️ 核心修復 2：直接傳入 message 物件，保留私密群組的下載權限上下文！
+            # 🛡️ 核心修復 2：直接傳入 message 物件，保留私密群組的下載權限上下文
             async for chunk in client.iter_download(message, offset=start):
+                # 🛡️ 核心修復 3：將 Telethon 的 memoryview 強制轉型為標準 bytes
+                chunk_bytes = bytes(chunk)
+                
                 if bytes_left <= 0:
                     break
-                if len(chunk) >= bytes_left:
-                    yield chunk[:bytes_left]
+                if len(chunk_bytes) >= bytes_left:
+                    yield chunk_bytes[:bytes_left]
                     break
-                yield chunk
-                bytes_left -= len(chunk)
+                yield chunk_bytes
+                bytes_left -= len(chunk_bytes)
+                
         except Exception as e:
             print(f"❌ 影片串流發生致命錯誤 (Message ID: {message_id}): {str(e)}")
 
-    # 🛡️ 核心修復 3：嚴格遵守 HTTP 規範，精準設定 Headers
+    # 🛡️ 核心修復 4：嚴格遵守 HTTP 規範，精準設定 Headers
     headers = {
         "Accept-Ranges": "bytes",
         "Content-Length": str(chunk_size),
@@ -142,7 +142,6 @@ async def debug_telegram_message(message_id: int, is_secret: bool = False):
     try:
         message = await client.get_messages(target_chat_id, ids=message_id)
         
-        # 再次確保快取刷新
         if not message:
             await client.get_dialogs()
             message = await client.get_messages(target_chat_id, ids=message_id)
