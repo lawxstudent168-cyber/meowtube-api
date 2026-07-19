@@ -12,13 +12,14 @@ from dotenv import load_dotenv
 # ==========================================
 load_dotenv()
 
-API_ID = int(os.getenv("TELEGRAM_API_ID", 0))
-API_HASH = os.getenv("TELEGRAM_API_HASH", "")
-SESSION_STRING = os.getenv("TELEGRAM_SESSION_STRING", "")
+# 👇 變數名稱已經修改為與 Render 上一模一樣
+API_ID = int(os.getenv("API_ID", 0))
+API_HASH = os.getenv("API_HASH", "")
+SESSION_STRING = os.getenv("SESSION_STRING", "")
 
-# 確保群組 ID 是整數，且帶有 -100 前綴
-PUBLIC_CHAT_ID = int(os.getenv("PUBLIC_CHAT_ID", 0))
-SECRET_CHAT_ID = int(os.getenv("SECRET_CHAT_ID", 0))
+# 確保群組 ID 是整數，且名稱對應 Render 的 KEY
+PUBLIC_CHAT_ID = int(os.getenv("TARGET_GROUP_ID", 0))
+SECRET_CHAT_ID = int(os.getenv("SECRET_TELEGRAM_CHAT_ID", 0))
 
 # 初始化 FastAPI
 app = FastAPI(title="Meowtube API")
