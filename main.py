@@ -118,16 +118,23 @@ async def stream_video(message_id: int, request: Request, is_secret: bool = Fals
         
     chunk_size = end - start + 1
     
-    async def video_generator():
-        bytes_left = chunk_size
-        async for chunk in client.iter_download(message.media, offset=start):
-            if bytes_left <= 0:
-                break
-            if len(chunk) >= bytes_left:
-                yield chunk[:bytes_left]
-                break
-            yield chunk
-            bytes_left -= len(chunk)
+async def video_generator():
+        try:
+            bytes_left = chunk_size
+            
+            # 👇 關鍵核心修改：將 message.media 改為直接傳入 message 本身！
+            async for chunk in client.iter_download(message, offset=start):
+                if bytes_left <= 0:
+                    break
+                if len(chunk) >= bytes_left:
+                    yield chunk[:bytes_left]
+                    break
+                yield chunk
+                bytes_left -= len(chunk)
+                
+        except Exception as e:
+            # 加入這行，如果 Telegram 還是拒絕下載，Render 的 Logs 裡面就會印出真正原因
+            print(f"影片串流發生致命錯誤: {str(e)}")
 
     # 👇 核心修復 2：嚴格遵守 HTTP 規範，區分 206 與 200 的 Headers 結構
     headers = {
