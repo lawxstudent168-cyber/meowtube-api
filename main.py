@@ -85,16 +85,24 @@ async def stream_video(message_id: int, request: Request, is_secret: bool = Fals
     target_chat_id = SECRET_CHAT_ID if is_secret else PUBLIC_CHAT_ID
     
     try:
-        message = await client.get_messages(target_chat_id, ids=message_id)
+        # 嘗試抓取
+        message = await client.get_messages(target_chat_id, ids=int(message_id))
+        
+        # 防護機制：解決 Telethon 論壇模式快取問題
+        if not message or not message.media:
+            await client.get_dialogs()
+            message = await client.get_messages(target_chat_id, ids=int(message_id))
+            
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Telegram 讀取失敗: {str(e)}")
         
     if not message or not message.media:
          raise HTTPException(status_code=404, detail="找不到影片，或該訊息不含媒體檔案")
          
-    file_size = message.document.size
+    # 👇 核心修復 1：使用 message.file 確保安全，並動態抓取真實的 mime_type
+    file_size = message.file.size
+    mime_type = message.file.mime_type or "video/mp4"
     
-    # 計算瀏覽器要求的影片區塊 (HTTP 206 Partial Content)
     range_header = request.headers.get("Range")
     if range_header:
         start, end = range_header.replace("bytes=", "").split("-")
@@ -106,29 +114,28 @@ async def stream_video(message_id: int, request: Request, is_secret: bool = Fals
         
     chunk_size = end - start + 1
     
-    # 👇 新增：精準切割位元組的產生器，不讓瀏覽器噎到
     async def video_generator():
         bytes_left = chunk_size
         async for chunk in client.iter_download(message.media, offset=start):
             if bytes_left <= 0:
                 break
-            
-            # 如果 Telegram 給的碎片比我們需要的大，就精準切割
             if len(chunk) >= bytes_left:
                 yield chunk[:bytes_left]
                 break
-            
-            # 如果還沒達到需要的量，就整塊給出去，並扣除已給的額度
             yield chunk
             bytes_left -= len(chunk)
 
-    # 組合回傳給瀏覽器的 Header 資訊
+    # 👇 核心修復 2：嚴格遵守 HTTP 規範，區分 206 與 200 的 Headers 結構
     headers = {
-        "Content-Range": f"bytes {start}-{end}/{file_size}",
         "Accept-Ranges": "bytes",
         "Content-Length": str(chunk_size),
-        "Content-Type": "video/mp4",
+        "Content-Type": mime_type, # 使用真實的檔案類型
     }
     
-    status_code = 206 if range_header else 200
+    if range_header:
+        headers["Content-Range"] = f"bytes {start}-{end}/{file_size}"
+        status_code = 206
+    else:
+        status_code = 200
+        
     return StreamingResponse(video_generator(), status_code=status_code, headers=headers)
